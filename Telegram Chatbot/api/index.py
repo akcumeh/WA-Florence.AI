@@ -10,16 +10,18 @@ openai.api_key = "sk-proj-yr2Ed812C2uGqpRdzghX3tlq0VrX6zbrX3mA4S8NsEj_wIiOFi6DbG
 
 def webhook():
     update = request.get_json()
-    message_text = update['message']['text']
-    chat_id = update['message']['chat']['id']
+    if "message" in update:
+        chat_id = update['message']['chat']['id']
+        message_text = update['message']['text']
 
-    #AI API
-    ai_response = call_ai_api(message_text)
+        #AI API
+        ai_response = "This is currently being worked on. Please check back!" # call_ai_api(message_text)
 
-    #Telegram API response
-    send_message(chat_id, ai_response)
+        #Telegram API response
+        send_message(chat_id, ai_response)
 
-    return 'OK'
+        return '', 200
+
 
 
 def call_ai_api(message_text):
