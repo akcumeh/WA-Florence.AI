@@ -9,8 +9,36 @@ bot_token = "8176471076:AAEUjHiy6ZD5KHK88CU6G34WWfYVAkZq26E"
 @app.route('/webhook', methods=['POST'])
 
 
+def send_message(chat_id, msg):
+    """
+        Sends a message to a Telegram user or group.
+    """
+    
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {'chat_id': chat_id, 'text': msg}
+    requests.post(url, json=payload)
+
+
+def answer_inline_query(inline_query_id, results):
+    """
+        For inline queries to the bot.
+    """
+
+    url = f"https://api.telegram.org/bot{bot_token}/answerInlineQuery"
+    payload = {
+        "inline_query_id": inline_query_id,
+        "results": results
+    }
+    requests.post(url, json=payload)
+
+
 def webhook():
+    """
+        Telegram Webhook to process all bot activity.
+    """
+
     update = request.get_json()
+
     if "message" in update:
         chat_id = update['message']['chat']['id']
         message_text = update['message']['text']
@@ -26,10 +54,22 @@ def webhook():
             ai_response = "This is currently being worked on. Please check back!" # call_ai_api(message_text)
             #Telegram API response
             send_message(chat_id, ai_response)
+    
+    if "inline_query" in update:
+        inline_query_id = update["inline_query"]["id"]
+        query = update["inline_query"]["query"]
 
-
-
-        return '', 200
+        results = [{
+                "type": "article",
+                "id": "1",
+                "title": "Sorry, this doesn't quite work right now.",
+                "input_message_content": {"message_text": "Sorry!"},
+                "reply_markup": {"inline_keyboard": [{"text": "Visit Florence*", "url": "https://t.me/FlorenceAIBot"}]}
+            }]
+    
+        answer_inline_query(inline_query_id, results)
+    
+    return '', 200
 
 
 
@@ -43,11 +83,5 @@ def call_ai_api(message_text):
     return response.choices[0].text.strip()
 
 
-def send_message(chat_id, msg):
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {'chat_id': chat_id, 'text': msg}
-    requests.post(url, json=payload)
-
-
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
