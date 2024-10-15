@@ -70,7 +70,12 @@ bot.on(String, ctx=> {
     bot.telegram.sendMessage(ctx.chat.id, ai_response, {});
 });
 
+<<<<<<< HEAD:Telegram Chatbot/api/index.js
+// app.use(bot.webhookCallback("/webhook"));
+// bot.telegram.setWebhook("https://tg-bot-2-ndtd8jd5j-angels-projects-9ba5ac71.vercel.app");
+=======
 app.use(bot.webhookCallback("/webhook"));
 bot.telegram.setWebhook("https://tg-bot-2-ndtd8jd5j-angels-projects-9ba5ac71.vercel.app/webhook");
+>>>>>>> parent of 488b853 (flask attempt restart):tg-bot-2/index.js
 
-// bot.launch()
+bot.launch()

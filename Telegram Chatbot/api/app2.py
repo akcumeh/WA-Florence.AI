@@ -1,15 +1,15 @@
 from flask import Flask, request, jsonify
 import openai
 import requests
-import logging
+import logging, ngrok
 
 app = Flask(__name__)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-openai.api_key = "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"
-bot_token = "8176471076:AAE5DBP8c01HzF5xwp7JY-XBC_cY8xRnSwM"
+openai.api_key = "" # api_key
+bot_token = "" # bot_token
 
 
 def send_message(chat_id, msg):
@@ -69,8 +69,8 @@ def webhook():
                 response = "Hello! I'm Florence. How may I assist you today?"
             elif message_text == "/about":
                 response = "Florence* is an edtech AI assistant."
-            else:
-                response = call_ai_api(message_text)
+            # else:
+            # response = "Hi! This doesn't work right now." # call_ai_api(message_text)
 
             send_result = send_message(chat_id, response)
             logging.info(f"Send message result: {send_result}")
