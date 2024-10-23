@@ -37,9 +37,9 @@ def send_message(chat_id, text):
 if __name__ == '__main__':
     app.run(debug=True)
 
-# def ai_response(text):
-#     ai_response = "Sorry, this service doesn't work yet!"
-#     return ai_response
+def ai_response(text):
+    ai_response = "Sorry, this service doesn't work yet!"
+    return ai_response
 
 
 
