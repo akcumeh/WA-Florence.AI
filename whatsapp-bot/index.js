@@ -1,24 +1,26 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const { MessagingResponse } = require('twilio').twiml;
-const { Configuration, OpenAIApi } = require('openai');
 require('dotenv').config();
+
+const { Configuration, OpenAIApi } = require('openai');
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
+
 
 const configuration = new Configuration({
     apiKey: process.env.OpenAI_API_Key,
 });
 const openai = new OpenAIApi(configuration);
 
-app.post('/whatsapp', (req, res) => {
+app.post('/whatsapp', async (req, res) => {
     const twiml = new MessagingResponse();
     const message = req.body.Body;
 
     try {
         const response = await openai.createChatCompletion({
-            model: "gpt-4.0",
+            model: "gpt-3.5-turbo",
             messages: [{
                 role: "user",
                 content: message,
