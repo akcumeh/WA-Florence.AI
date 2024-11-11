@@ -1,5 +1,5 @@
 import express from 'express';
-import fetch from 'node-fetch'; // Changed to node-fetch
+import fetch from 'node-fetch';
 import bodyParser from 'body-parser';
 import twilio from 'twilio';
 import dotenv from 'dotenv';
@@ -39,7 +39,16 @@ function isNewUser(WaId) {
  * @param {string} referralId 
  */
 function addNewUser(WaId, ProfileName, tokens, streak, referralId = `${ProfileName[0]}${WaId}`) {
-    floDb.push({ WaId, ProfileName, tokens, referralId, streak });
+    floDb.push({ 
+        WaId, 
+        ProfileName, 
+        tokens, 
+        referralId, 
+        streak,
+        lastTokenReward: new Date().toISOString(),
+        lastActivity: new Date().toISOString(),
+        streakDate: new Date().toISOString()
+    });
 }
 
 /**
@@ -81,7 +90,14 @@ async function newUserWalkthru(WaId, tokens) {
         `Interacting with Florence* costs you *tokens**. Every now and then you'll get these, ` +
         `but you can also purchase more of them at any time.\n\n` +
         `You currently have ${tokens} tokens*. Feel free to send your text (one token*), ` +
-        `images (two tokens*), or documents (two tokens*) and get answers immediately.\n\n`,
+        `images (two tokens*), or documents (two tokens*) and get answers immediately.\n\n` +
+        `Here are a few helpful commands for a smooth experience:\n\n` +
+        `*/start* - Florence* is now listening to you.\n` +
+        `*/about* - for more about Florence*.\n` +
+        `*/tokens* - see how many tokens you have left.\n` +
+        `*/streak* - see your streak.\n` +
+        `*/payments* - Top up your tokens* in a click.\n\n` +
+        `*Please note:* Every other message will be considered a prompt.`,
         WaId
     );
 }
@@ -96,7 +112,7 @@ async function claudeMessage(messages) {
         const claudeMsg = await anthropic.messages.create({
             model: "claude-3-5-sonnet-20241022",
             max_tokens: 1024,
-            system: "You are a highly knowledgeable teacher on every subject.",
+            system: "You are a highly knowledgeable teacher on every subject. Your name is Florence*.",
             messages: messages,
         });
 
@@ -126,39 +142,62 @@ async function getBase64FromUrl(url) {
 /**
  * Determine media type from URL or content type
  * @param {string} url 
- * @param {string} contentType 
+ * @param {string|undefined} contentType 
  * @returns {string}
  */
 function determineMediaType(url, contentType) {
-    if (contentType) return contentType;
+    // If content type is provided directly, normalize it
+    if (contentType) {
+        // Convert to lowercase and handle common variations
+        const normalizedType = contentType.toLowerCase();
+        if (normalizedType.includes('jpeg') || normalizedType.includes('jpg')) {
+            return 'image/jpeg';
+        }
+        if (normalizedType.includes('png')) {
+            return 'image/png';
+        }
+        if (normalizedType.includes('gif')) {
+            return 'image/gif';
+        }
+        if (normalizedType.includes('webp')) {
+            return 'image/webp';
+        }
+    }
+    
+    // If determining from URL, ensure we return exact matches
     const extension = url.split('.').pop().toLowerCase();
     const mimeTypes = {
         'jpg': 'image/jpeg',
         'jpeg': 'image/jpeg',
         'png': 'image/png',
         'gif': 'image/gif',
-        'pdf': 'application/pdf',
-        'doc': 'application/msword',
-        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        'webp': 'image/webp'
     };
-    return mimeTypes[extension] || 'application/octet-stream';
+    return mimeTypes[extension] || 'image/jpeg'; // default to jpeg if unable to determine
 }
 
 /**
  * Send message to Claude with attachments
- * @param {Array<string>} urls 
+ * @param {Array<{url: string, contentType: string}>} mediaItems 
  * @param {string} prompt 
  * @returns {Promise<string>}
  */
-async function claudeMessageWithAttachment(urls, prompt) {
+async function claudeMessageWithAttachment(mediaItems, prompt) {
     try {
-        const attachmentPromises = urls.map(async (url) => {
+        const attachmentPromises = mediaItems.map(async ({ url, contentType }) => {
             const imageData = await getBase64FromUrl(url);
+            const mediaType = determineMediaType(url, contentType);
+            
+            // Validate media type before sending to Claude
+            if (!['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(mediaType)) {
+                throw new Error(`Unsupported media type: ${mediaType}. Only JPEG, PNG, GIF, and WebP images are supported.`);
+            }
+
             return {
                 type: "image",
                 source: {
                     type: "base64",
-                    media_type: determineMediaType(url),
+                    media_type: mediaType,
                     data: imageData
                 }
             };
@@ -188,6 +227,69 @@ async function claudeMessageWithAttachment(urls, prompt) {
     }
 }
 
+/**
+ * Check and update user's token rewards
+ * @param {Object} user - User object
+ * @returns {number} - Number of tokens awarded
+ */
+function checkAndUpdateTokenRewards(user) {
+    const now = new Date();
+    const lastReward = new Date(user.lastTokenReward);
+    const hoursSinceLastReward = (now - lastReward) / (1000 * 60 * 60);
+    
+    let tokensAwarded = 0;
+    
+    // Award tokens every 8 hours
+    if ((hoursSinceLastReward >= 8) && (user.tokens <= 4)) {
+        const rewardCount = Math.floor(hoursSinceLastReward / 8);
+        tokensAwarded = rewardCount * 10;
+        user.tokens += tokensAwarded;
+        user.lastTokenReward = now.toISOString();
+    }
+    
+    return tokensAwarded;
+}
+
+/**
+ * Check and update user's streak
+ * @param {Object} user - User object
+ * @returns {Object} - Streak information
+ */
+function checkAndUpdateStreak(user) {
+    const now = new Date();
+    const lastActivity = new Date(user.lastActivity);
+    const streakDate = new Date(user.streakDate);
+    
+    // Reset streak if more than 48 hours have passed since last activity
+    if ((now - lastActivity) > (48 * 60 * 60 * 1000)) {
+        user.streak = 0;
+        user.streakDate = now.toISOString();
+        return { streakBroken: true, streakReward: 0 };
+    }
+    
+    // Check if it's a new day (different date from streak date)
+    if (now.toDateString() !== streakDate.toDateString()) {
+        user.streak += 1;
+        user.streakDate = now.toISOString();
+        
+        // Award tokens for streak milestones (multiples of 10)
+        if (user.streak % 10 === 0) {
+            user.tokens += 10;
+            return { streakBroken: false, streakReward: 10 };
+        }
+    }
+    
+    return { streakBroken: false, streakReward: 0 };
+}
+
+/**
+ * Update user's activity timestamps
+ * @param {Object} user - User object
+ */
+function updateUserActivity(user) {
+    user.lastActivity = new Date().toISOString();
+}
+
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
@@ -198,8 +300,9 @@ app.post('/whatsapp', async (req, res) => {
 
     try {
         if (isNewUser(WaId)) {
-            addNewUser(WaId, ProfileName, 10, 0);
+            addNewUser(WaId, ProfileName, 100, 0);
             await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348164975875');
+            await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348143770724');
             console.dir(floDb);
 
             await newUserWalkthru(WaId, getUser(WaId).tokens);
@@ -207,6 +310,14 @@ app.post('/whatsapp', async (req, res) => {
             const user = getUser(WaId);
             if (!user) {
                 throw new Error(`User ${WaId} not found in database`);
+            }
+
+            const tokenReward = checkAndUpdateTokenRewards(user);
+            if (tokenReward > 0) {
+                await createMessage(
+                    `You've earned ${tokenReward} tokens for staying active! 🎉`,
+                    WaId
+                );
             }
 
             switch(Body) {
@@ -248,15 +359,34 @@ app.post('/whatsapp', async (req, res) => {
                         );
                     }
                     break;
-                    
+                
+                case '/streak':
+                    await createMessage(
+                        `Hey ${ProfileName.split(' ')[0]}, you are on a ${user.streak}-day streak. Send one prompt a day to keep it going!`,
+                        WaId
+                    );
+                    break;
+                
                 default:
                     console.log('Processing user message with Claude API');
                     if (user.tokens <= 0) {
                         await createMessage(
-                            `You've run out of tokens. To top up, send /payments`,
+                            `You've run out of tokens. Please purchase more using /payments`,
                             WaId
                         );
                         break;
+                    }
+
+                    // Update user activity and check streak before processing message
+                    updateUserActivity(user);
+                    const { streakBroken, streakReward } = checkAndUpdateStreak(user);
+                    
+                    if (streakReward > 0) {
+                        await createMessage(
+                            `🔥 Congratulations! You've maintained a ${user.streak}-day streak! ` +
+                            `You've earned ${streakReward} bonus tokens! 🎉`,
+                            WaId
+                        );
                     }
 
                     if (MessageType === 'image' || MessageType === 'document') {
@@ -268,8 +398,14 @@ app.post('/whatsapp', async (req, res) => {
                             );
                         } else {
                             user.tokens -= 2;
-                            const urls = [MediaUrl0].filter(Boolean);
-                            const claudeResponse = await claudeMessageWithAttachment(urls, Body);
+                            const mediaItems = [
+                                {
+                                    url: MediaUrl0,
+                                    contentType: MediaContentType0
+                                }
+                            ].filter(item => item.url); // Only include items with valid URLs
+                            
+                            const claudeResponse = await claudeMessageWithAttachment(mediaItems, Body || "Please analyze this attachment.");
                             await createMessage(claudeResponse, WaId);
                         }
                     } else if (MessageType === 'text') {
