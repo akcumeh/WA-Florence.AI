@@ -19,5 +19,6 @@
     "ngrok": "^5.0.0-beta.2",
     "openai": "^4.68.3",
     "twilio": "^5.3.5"
-  }
+  },
+  "type": "module"
 }

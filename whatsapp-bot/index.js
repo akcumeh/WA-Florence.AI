@@ -1,99 +1,299 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const twilio = require('twilio');
+import express from 'express';
+import fetch from 'node-fetch'; // Changed to node-fetch
+import bodyParser from 'body-parser';
+import twilio from 'twilio';
+import dotenv from 'dotenv';
 
-require('dotenv').config();
+dotenv.config();
+
+import Anthropic from '@anthropic-ai/sdk';
+
+const anthropic = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    default_headers: {
+        "anthropic-beta": "pdfs-2024-09-25"
+    }
+});
+
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
 const client = twilio(accountSid, authToken);
 
 var floDb = new Array();
 
-function isNewUser(WaId) {
-    return ((floDb.filter(item => item.WaId === WaId)).length === 0)
-};
-
-// ??????????
-function addNewUser(WaId, ProfileName, tokens, referralId=`${ProfileName[0]+WaId}`, streak) {
-    floDb.push({WaId, ProfileName, tokens, referralId, streak});
-};
-
-// This function sends a message to the user at WaId.
-/** @param
- * 
+/**
+ * Check if a user is new based on WaId
+ * @param {string} WaId - WhatsApp ID
+ * @returns {boolean}
  */
-async function createMessage(newMsg, WaId) {
-    const message = await client.messages.create({
-        body: newMsg,
-        from: "whatsapp:+14155238886",
-        to: "whatsapp:+" + WaId,
-    });
+function isNewUser(WaId) {
+    return floDb.filter(item => item.WaId === WaId).length === 0;
 }
 
-async function changeProfileName(WaId, buttonContents) {
-    const buttonMessage = await client.messages.create({
-        contentSid: 'HX3282e6a1fab39e47675f1ab69e39b38e',
-        contentVariables: JSON.stringify(buttonContents),
-        from: "whatsapp:+14155238886",
-        to: "whatsapp:+" + WaId,
-    });
+/**
+ * Add a new user to the database
+ * @param {string} WaId - WhatsApp ID
+ * @param {string} ProfileName 
+ * @param {number} tokens 
+ * @param {number} streak 
+ * @param {string} referralId 
+ */
+function addNewUser(WaId, ProfileName, tokens, streak, referralId = `${ProfileName[0]}${WaId}`) {
+    floDb.push({ WaId, ProfileName, tokens, referralId, streak });
+}
 
-    console.log(buttonMessage.to[10]);
-};
+/**
+ * Get user by WhatsApp ID
+ * @param {string} WaId - WhatsApp ID
+ * @returns {Object|undefined}
+ */
+function getUser(WaId) {
+    return floDb.find(item => item.WaId === WaId);
+}
 
-async function newUserWalkthru(WaId) {
-    await createMessage(`Hello there! Welcome to Florence! Feel free to send Florence a question at any time.\n\n\nInteracting with Florence costs you *tokens**. Every now and then you'll get these as you interact with Florence. You can also purchase more of them at any time. You currently have ${tokens} tokens.\n\n\nFlorence* is your educational assistant at your fingertips. Feel free to send your text, images, or documents and get answers immediately.`, WaId);
+/**
+ * Send a WhatsApp message
+ * @param {string} newMsg 
+ * @param {string} WaId 
+ */
+async function createMessage(newMsg, WaId) {
+    try {
+        const message = await client.messages.create({
+            body: newMsg,
+            from: "whatsapp:+14155238886",
+            to: `whatsapp:+${WaId}`,
+        });
+        return message;
+    } catch (error) {
+        console.error('Error sending message:', error);
+        throw error;
+    }
+}
 
-    await changeProfileName(WaId, {
-        1: 'Choose a new name:',
-        2: 'Not now, I\'m fine with my name'
-    });
-};
+/**
+ * Send welcome message to new users
+ * @param {string} WaId 
+ * @param {number} tokens 
+ */
+async function newUserWalkthru(WaId, tokens) {
+    await createMessage(
+        `Hello there! Welcome to Florence*, your educational assistant at your fingertips.\n\n` +
+        `Interacting with Florence* costs you *tokens**. Every now and then you'll get these, ` +
+        `but you can also purchase more of them at any time.\n\n` +
+        `You currently have ${tokens} tokens*. Feel free to send your text (one token*), ` +
+        `images (two tokens*), or documents (two tokens*) and get answers immediately.\n\n`,
+        WaId
+    );
+}
+
+/**
+ * Send message to Claude
+ * @param {Array} messages 
+ * @returns {Promise<string>}
+ */
+async function claudeMessage(messages) {
+    try {
+        const claudeMsg = await anthropic.messages.create({
+            model: "claude-3-5-sonnet-20241022",
+            max_tokens: 1024,
+            system: "You are a highly knowledgeable teacher on every subject.",
+            messages: messages,
+        });
+
+        return claudeMsg.content[0].text;
+    } catch (error) {
+        console.error('Error in Claude message:', error);
+        throw error;
+    }
+}
+
+/**
+ * Convert URL to base64
+ * @param {string} url 
+ * @returns {Promise<string>}
+ */
+async function getBase64FromUrl(url) {
+    try {
+        const response = await fetch(url);
+        const buffer = await response.buffer();
+        return buffer.toString('base64');
+    } catch (error) {
+        console.error('Error fetching image:', error);
+        throw error;
+    }
+}
+
+/**
+ * Determine media type from URL or content type
+ * @param {string} url 
+ * @param {string} contentType 
+ * @returns {string}
+ */
+function determineMediaType(url, contentType) {
+    if (contentType) return contentType;
+    const extension = url.split('.').pop().toLowerCase();
+    const mimeTypes = {
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'png': 'image/png',
+        'gif': 'image/gif',
+        'pdf': 'application/pdf',
+        'doc': 'application/msword',
+        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    };
+    return mimeTypes[extension] || 'application/octet-stream';
+}
+
+/**
+ * Send message to Claude with attachments
+ * @param {Array<string>} urls 
+ * @param {string} prompt 
+ * @returns {Promise<string>}
+ */
+async function claudeMessageWithAttachment(urls, prompt) {
+    try {
+        const attachmentPromises = urls.map(async (url) => {
+            const imageData = await getBase64FromUrl(url);
+            return {
+                type: "image",
+                source: {
+                    type: "base64",
+                    media_type: determineMediaType(url),
+                    data: imageData
+                }
+            };
+        });
+
+        const attachments = await Promise.all(attachmentPromises);
+        
+        const claudeMsg = await anthropic.messages.create({
+            model: "claude-3-5-sonnet-20241022",
+            max_tokens: 1024,
+            messages: [{
+                role: "user",
+                content: [
+                    ...attachments,
+                    {
+                        type: "text",
+                        text: prompt
+                    }
+                ]
+            }]
+        });
+
+        return claudeMsg.content[0].text;
+    } catch (error) {
+        console.error('Error in claudeMessageWithAttachment:', error);
+        throw error;
+    }
+}
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-
 app.post('/whatsapp', async (req, res) => {
-    let { WaId, MessageType, ProfileName, Body } = req.body;
-    let tokens = 10;
-    let streak = 0;
-    
-    if (isNewUser(WaId)) {
-        addNewUser(parseInt(WaId), ProfileName);
-        await createMessage(`A new user, ${ProfileName} (${'+'+WaId}) has joined Florence*.`, 2348164975875);
-        await createMessage(`A new user, ${ProfileName} (${'+'+WaId}) has joined Florence*.`, 2348143770724);
+    let { WaId, MessageType, ProfileName, Body, NumMedia, MediaUrl0, MediaContentType0 } = req.body;
 
-        await createMessage(`Hello ${ProfileName}, welcome to Florence*! What do you need help with today?\n\n\nYou have ${tokens} tokens.`, WaId);
+    console.log(req.body);
 
-        console.dir(floDb);
+    try {
+        if (isNewUser(WaId)) {
+            addNewUser(WaId, ProfileName, 10, 0);
+            await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348164975875');
+            console.dir(floDb);
 
+            await newUserWalkthru(WaId, getUser(WaId).tokens);
+        } else {
+            const user = getUser(WaId);
+            if (!user) {
+                throw new Error(`User ${WaId} not found in database`);
+            }
 
-        await newUserWalkthru(WaId);
+            switch(Body) {
+                case '/start':
+                    await createMessage(
+                        `Hello ${ProfileName}, welcome to Florence*! What do you need help with today?\n\n` +
+                        `You have ${user.tokens} tokens.`,
+                        WaId
+                    );
+                    break;
+                    
+                case '/about':
+                    console.log('Informing the user.');
+                    await createMessage(
+                        `Florence* is the educational assistant at your fingertips. More info here: <link>.`,
+                        WaId
+                    );
+                    break;
+                    
+                case '/payments':
+                    console.log('payment!');
+                    await createMessage(
+                        `Tokens cost 1000 naira for 10. Make your payments here:\n\n` +
+                        `https://flutterwave.com/pay/jinkrgxqambh`,
+                        WaId
+                    );
+                    break;
+                    
+                case '/tokens':
+                    await createMessage(
+                        `Hey ${ProfileName.split(' ')[0]}, you have ${user.tokens} tokens.`,
+                        WaId
+                    );
 
-        if (MessageType=='button') {
-            if (Body == buttonContents[1]) {
-                await createMessage('Type your preferred name.');
-                ProfileName = Body;
-                console.log(floDb[WaId]);
-            };
-        };
-    } else {
-        console.log('Is not a new user.');
-        await createMessage(`Hello again, ${ProfileName}. You currently have ${tokens} tokens. What would you like to do today?`);
-    };
+                    if (user.tokens <= 4) {
+                        await createMessage(
+                            `You are running low on tokens. Top up by sending /payments.`,
+                            WaId
+                        );
+                    }
+                    break;
+                    
+                default:
+                    console.log('Processing user message with Claude API');
+                    if (user.tokens <= 0) {
+                        await createMessage(
+                            `You've run out of tokens. To top up, send /payments`,
+                            WaId
+                        );
+                        break;
+                    }
 
+                    if (MessageType === 'image' || MessageType === 'document') {
+                        if (parseInt(NumMedia) > 5) {
+                            await createMessage(
+                                `Sorry, we can't handle that many images/documents right now. ` +
+                                `Please send 5 or fewer at a time.`,
+                                WaId
+                            );
+                        } else {
+                            user.tokens -= 2;
+                            const urls = [MediaUrl0].filter(Boolean);
+                            const claudeResponse = await claudeMessageWithAttachment(urls, Body);
+                            await createMessage(claudeResponse, WaId);
+                        }
+                    } else if (MessageType === 'text') {
+                        user.tokens -= 1;
+                        const claudeResponse = await claudeMessage([{ role: "user", content: Body }]);
+                        await createMessage(claudeResponse, WaId);
+                    } else {
+                        await createMessage(
+                            `Sorry, this is a little too much for us to handle now. ` +
+                            `Could you try simplifying your prompt?`,
+                            WaId
+                        );
+                    }
+            }
+        }
 
-
-    // res.writeHead(200, { "Content-Type": 'text/xml' });
-    // res.end(twiml.toString());
-    res.send('HIIIIIIII.', 200);
+        res.status(200).send('Request processed successfully');
+    } catch (error) {
+        console.error('Error processing request:', error);
+        res.status(500).send('An error occurred while processing your request');
+    }
 });
 
-const port = process.env.PORT
-console.log(port);
-
+const port = process.env.PORT;
 app.listen(port, () => {
     console.log(`Server is running on port ${port}.`);
 });
-

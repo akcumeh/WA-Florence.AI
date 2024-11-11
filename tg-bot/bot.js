@@ -3,7 +3,7 @@ const https = require('https');
 const { send, listeners } = require('process');
 const token = process.env.BOT_TOKEN;
 const tg_api = `https://api.telegram.org/bot${token}/`;
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 const server = https.createServer((req, res) => {
     if ((req.method === 'POST') && (req.url === '/webhook')) {
         console.log('Received webhook request'); // Add this debug log
@@ -103,12 +103,14 @@ async function startBot() {
                     const response = JSON.parse(data);
                     
                     if (response.ok) {
-                        resolve();
+                        handleUpdate(res);
                     } else {
                         reject(new Error(response.description));
                     }
                 });
             }).on('error', reject);
+
+            // handleUpdate(`Hi!`);
         });
         
         server.listen(PORT, () => {
