@@ -4,7 +4,7 @@
   "main": "bot.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node bot.js"
+    "start": "node index.js"
   },
   "keywords": [],
   "author": "",
@@ -12,6 +12,8 @@
   "description": "",
   "dependencies": {
     "dotenv": "^16.4.5",
-    "ngrok": "^5.0.0-beta.2"
+    "express": "^4.21.1",
+    "ngrok": "^5.0.0-beta.2",
+    "telegraf": "^4.16.3"
   }
 }

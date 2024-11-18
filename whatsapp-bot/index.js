@@ -1,3 +1,4 @@
+// Imports & Integrations
 import express from 'express';
 import fetch from 'node-fetch';
 import bodyParser from 'body-parser';
@@ -8,6 +9,7 @@ dotenv.config();
 
 import Anthropic from '@anthropic-ai/sdk';
 
+// Setup
 const anthropic = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY,
     default_headers: {
@@ -19,8 +21,10 @@ const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
 const client = twilio(accountSid, authToken);
 
+// Database
 var floDb = new Array();
 
+// Handy Functions
 /**
  * Check if a user is new based on WaId
  * @param {string} WaId - WhatsApp ID
@@ -38,7 +42,7 @@ function isNewUser(WaId) {
  * @param {number} streak 
  * @param {string} referralId 
  */
-function addNewUser(WaId, ProfileName, tokens, streak, referralId = `${ProfileName[0]}${WaId}`) {
+function addUser(WaId, ProfileName, tokens, streak, referralId = `${ProfileName[0]}${WaId}`) {
     floDb.push({ 
         WaId, 
         ProfileName, 
@@ -114,7 +118,10 @@ async function claudeMessage(messages) {
             max_tokens: 1024,
             system: "You are a highly knowledgeable teacher on every subject. Your name is Florence*.",
             messages: messages,
+            stream: true
         });
+
+        console.log(claudeMsg);
 
         return claudeMsg.content[0].text;
     } catch (error) {
@@ -290,6 +297,7 @@ function updateUserActivity(user) {
     user.lastActivity = new Date().toISOString();
 }
 
+// Application
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
@@ -300,7 +308,7 @@ app.post('/whatsapp', async (req, res) => {
 
     try {
         if (isNewUser(WaId)) {
-            addNewUser(WaId, ProfileName, 100, 0);
+            addUser(WaId, ProfileName, 100, 0);
             await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348164975875');
             await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348143770724');
             console.dir(floDb);
@@ -429,6 +437,7 @@ app.post('/whatsapp', async (req, res) => {
     }
 });
 
+// Start the server
 const port = process.env.PORT;
 app.listen(port, () => {
     console.log(`Server is running on port ${port}.`);
