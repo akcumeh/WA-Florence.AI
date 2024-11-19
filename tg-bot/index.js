@@ -128,7 +128,7 @@ async function verifyPaymentProof(pdfBuffer, requestTimestamp) {
         const text = data.text.toLowerCase();
 
         // Keywords to look for in the PDF
-        const keywords = ['payment', 'successful', 'completed', 'florence', '1000'];
+        const keywords = ['payment', 'flutterwave', 'florence', '1000'];
         const hasKeywords = keywords.some(keyword => text.includes(keyword));
 
         // Extract timestamp from PDF (this is a simplified example)
@@ -165,7 +165,7 @@ async function verifyPaymentProof(pdfBuffer, requestTimestamp) {
 }
 
 // Middleware
-app.use(bot.webhookCallback('/webhook'));
+app.use(bot.webhookCallback('/telegram'));
 
 bot.use((ctx, next) => {
     console.log('Incoming message:', ctx.message);
@@ -303,8 +303,8 @@ bot.on('message', async (ctx) => {
 
 // Start Express server
 app.listen(PORT, async () => {
-    console.log(`Server is running on port ${PORT}`);
-    const webhookUrl = `${WEBHOOK_URL}/webhook`;
+    console.log(`Server is running on port ${PORT}. Telegram`);
+    const webhookUrl = `${WEBHOOK_URL}/telegram`;
 
     // Try to set up webhook with retry logic
     const webhookSuccess = await setWebhookWithRetry(bot, webhookUrl);

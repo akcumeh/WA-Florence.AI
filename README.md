@@ -4,3 +4,6 @@
 
 ## Table of Contents
 
+
+### Other fun stuff
+[![wakatime](https://wakatime.com/badge/github/akcumeh/Florence.AI.svg)](https://wakatime.com/badge/github/akcumeh/Florence.AI)
