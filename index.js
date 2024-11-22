@@ -116,9 +116,8 @@ async function claudeMessage(messages) {
         const claudeMsg = await anthropic.messages.create({
             model: "claude-3-5-sonnet-20241022",
             max_tokens: 1024,
-            system: "You are a highly knowledgeable teacher on every subject. Your name is Florence*.",
-            messages: messages,
-            stream: true
+            system: "You are a highly knowledgeable teacher on every subject. Your name is Florence*. You help people gain a deeper understanding on any topic. Respond with a clear and detailed, but not necessarily long explanation.",
+            messages: messages
         });
 
         console.log(claudeMsg);
@@ -308,7 +307,7 @@ app.post('/whatsapp', async (req, res) => {
 
     try {
         if (isNewUser(WaId)) {
-            addUser(WaId, ProfileName, 100, 0);
+            addUser(WaId, ProfileName, 25, 0);
             await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348164975875');
             await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348143770724');
             console.dir(floDb);
@@ -377,6 +376,7 @@ app.post('/whatsapp', async (req, res) => {
                 
                 default:
                     console.log('Processing user message with Claude API');
+                    await createMessage(`Processing your request...`, WaId);
                     if (user.tokens <= 0) {
                         await createMessage(
                             `You've run out of tokens. Please purchase more using /payments`,
