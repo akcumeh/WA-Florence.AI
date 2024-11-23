@@ -1,77 +1,80 @@
-const express = require('express');
-const { Telegraf } = require('telegraf');
-const { default: axios } = require('axios');
-const pdf = require('pdf-parse');
-require('dotenv').config();
+ // routes/telegram.js
+import express from 'express';
+import Anthropic from '@anthropic-ai/sdk';
+import axios from 'axios';
+import pdf from 'pdf-parse';
+import { setTimeout } from 'timers/promises';
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
-const PORT = process.env.PORT || 4000;
+const router = express.Router();
+
+// Configuration
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-const { setTimeout } = require('timers/promises');
+// Database
+const telegramDb = new Map();
+const paymentRequests = new Map();
 
-// Implement retry logic for webhook setup
-async function setWebhookWithRetry(bot, webhookUrl, maxRetries = 5, initialDelay = 5000) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            await bot.telegram.setWebhook(webhookUrl);
-            console.log(`Webhook successfully set to: ${webhookUrl}`);
-            return true;
-        } catch (error) {
-            console.error(`Attempt ${attempt}/${maxRetries} failed to set webhook:`, error.message);
-
-            if (attempt === maxRetries) {
-                console.error('Max retries reached. Continuing without webhook setup...');
-                return false;
-            }
-
-            // Exponential backoff: wait longer between each retry
-            const delay = initialDelay * Math.pow(2, attempt - 1);
-            console.log(`Retrying in ${delay / 1000} seconds...`);
-            await setTimeout(delay);
-        }
-    }
-}
-
-if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required in .env");
-if (!CLAUDE_API_KEY) throw new Error("CLAUDE_API_KEY is required in .env");
-
-const bot = new Telegraf(BOT_TOKEN);
-const app = express();
-
-// In-memory database (you might want to switch to a real database later)
-const floDb = new Map();
-const paymentRequests = new Map(); // Store timestamps of payment requests
-
-// Claude API client
-const claudeClient = axios.create({
-    baseURL: 'https://api.anthropic.com/v1',
-    headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': CLAUDE_API_KEY,
-        'anthropic-version': '2023-06-01'
-    }
+// Initialize Anthropic client
+const anthropic = new Anthropic({
+    apiKey: process.env.TELEGRAM_ANTHROPIC_API_KEY,
 });
 
-// User management functions
-async function newUserWalkthru(tgId, tokens) {
-    await createMessage(
-        `Hello there! Welcome to Florence*, your educational assistant at your fingertips.\n\n` +
-        `Interacting with Florence* costs you tokens*. Every now and then you'll get these, ` +
-        `but you can also purchase more of them at any time.\n\n` +
-        `You currently have ${tokens} tokens*. Feel free to send your text (one token*), ` +
-        `images (two tokens*), or documents (two tokens*) and get answers immediately.\n\n` +
-        `Here are a few helpful commands for a smooth experience:\n\n` +
-        `/start - Florence* is now listening to you.\n` +
-        `/about - for more about Florence*.\n` +
-        `/tokens - see how many tokens you have left.\n` +
-        `/streak - see your streak.\n` +
-        `/payments - Top up your tokens* in a click.\n\n` +
-        `Please note: Every message except commands will be considered a prompt.`,
-        tgId
-    );
+// Helper Functions
+async function sendTelegramMessage(chatId, text, parse_mode = 'HTML') {
+    try {
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            chat_id: chatId,
+            text,
+            parse_mode
+        });
+    } catch (error) {
+        console.error('Error sending Telegram message:', error);
+        throw error;
+    }
 }
+
+async function getFile(fileId) {
+    try {
+        const response = await axios.get(
+            `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`
+        );
+        return response.data.result;
+    } catch (error) {
+        console.error('Error getting file:', error);
+        throw error;
+    }
+}
+
+async function downloadFile(filePath) {
+    try {
+        const response = await axios.get(
+            `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`,
+            { responseType: 'arraybuffer' }
+        );
+        return response.data;
+    } catch (error) {
+        console.error('Error downloading file:', error);
+        throw error;
+    }
+}
+
+async function claudeMessage(content) {
+    try {
+        const claudeMsg = await anthropic.messages.create({
+            model: "claude-3-sonnet-20240229",
+            max_tokens: 1024,
+            system: "You are Florence*, a highly knowledgeable teacher on every subject. Help people gain a deeper understanding on any topic.",
+            messages: [{ role: "user", content }]
+        });
+        return claudeMsg.content[0].text;
+    } catch (error) {
+        console.error('Error in Claude message:', error);
+        throw error;
+    }
+}
+
+// User Management
 function addUser(user) {
     const userData = {
         id: user.id,
@@ -83,246 +86,174 @@ function addUser(user) {
         tokens: 10,
         lastActive: new Date()
     };
-    floDb.set(user.id, userData);
-    console.log(`User added: ${user.id}`);
+    telegramDb.set(user.id, userData);
     return userData;
 }
 
-function getUser(tgId) {
-    return floDb.get(tgId);
+function getUser(id) {
+    return telegramDb.get(id);
 }
 
-// Message handling functions
-async function createMessage(newMsg, tgId) {
-    try {
-        await bot.telegram.sendMessage(tgId, newMsg);
-    } catch (error) {
-        console.error('Error sending message:', error);
-        throw error;
-    }
-}
+// Message Handlers
+async function handleCommand(command, msg) {
+    const user = getUser(msg.from.id);
 
-async function askClaude(message) {
-    try {
-        const response = await claudeClient.post('/messages', {
-            model: 'claude-3-sonnet-20240229',
-            max_tokens: 1024,
-            messages: [{
-                role: 'user',
-                content: message
-            }],
-            system: "You are a highly knowledgeable teacher on every subject. Your name is Florence*."
-        });
+    switch (command) {
+        case '/start':
+            return `Hello ${msg.from.first_name}, welcome to Florence*! What do you need help with today?\n\nYou have ${user.tokens} tokens.`;
 
-        // The response structure has changed
-        return response.data.content[0].text;
-    } catch (error) {
-        console.error('Error calling Claude API:', error.response?.data || error.message);
-        throw error;
-    }
-};
+        case '/about':
+            return `Florence* is the educational assistant at your fingertips. More info here: <link>.`;
 
-async function verifyPaymentProof(pdfBuffer, requestTimestamp) {
-    try {
-        const data = await pdf(pdfBuffer);
-        const text = data.text.toLowerCase();
+        case '/tokens':
+            return `You have ${user.tokens} tokens. To top up, send /payments.`;
 
-        // Keywords to look for in the PDF
-        const keywords = ['payment', 'flutterwave', 'florence', '1000'];
-        const hasKeywords = keywords.some(keyword => text.includes(keyword));
+        case '/streak':
+            return `Your current streak is ${user.streak}.\n\nSend a message every day to keep it going!`;
 
-        // Extract timestamp from PDF (this is a simplified example)
-        const dateRegex = /\d{2}[-/]\d{2}[-/]\d{4}/g;
-        const dates = text.match(dateRegex);
+        case '/payments':
+            paymentRequests.set(user.id, new Date());
+            return 'Tokens cost 1000 naira for 10. Make your payments here:\n\nhttps://flutterwave.com/pay/jinkrgxqambh\n\nthen send the proof of payment (PDFs only) to get your tokens.';
 
-        if (!dates || !hasKeywords) {
-            return {
-                valid: false,
-                reason: !dates ? 'No valid date found' : 'Missing required payment information'
-            };
-        }
-
-        // Convert found date to timestamp and compare
-        const paymentDate = new Date(dates[0]);
-        if (paymentDate < requestTimestamp) {
-            return {
-                valid: false,
-                reason: 'Payment proof predates payment request'
-            };
-        }
-
-        return {
-            valid: true,
-            date: paymentDate
-        };
-    } catch (error) {
-        console.error('Error verifying PDF:', error);
-        return {
-            valid: false,
-            reason: 'Error processing PDF'
-        };
+        default:
+            return null;
     }
 }
 
-// Middleware
-app.use(bot.webhookCallback('/telegram'));
-
-bot.use((ctx, next) => {
-    console.log('Incoming message:', ctx.message);
-    if (!ctx.from.is_bot) {
-        let user = getUser(ctx.from.id);
-        if (!user) {
-            user = addUser(ctx.from);
-            newUserWalkthru(user.id, user.tokens);
-        }
-        // Update last active timestamp
-        user.lastActive = new Date();
-        floDb.set(user.id, user);
-    }
-    return next();
-});
-
-// Bot commands
-bot.command('about', (ctx) => {
-    ctx.reply(`Florence* is the educational assistant at your fingertips. More info here: <link>.`);
-});
-
-bot.command('tokens', (ctx) => {
-    const user = getUser(ctx.from.id);
-    ctx.reply(`You have ${user.tokens} tokens. To top up, send /payments.`);
-});
-
-bot.command('streak', (ctx) => {
-    const user = getUser(ctx.from.id);
-    ctx.reply(`Your current streak is ${user.streak}.\n\nSend a message every day to keep it going!`);
-});
-
-bot.command('start', (ctx) => {
-    const user = getUser(ctx.from.id);
-    ctx.reply(`Hello ${ctx.from.first_name}, welcome to Florence*! What do you need help with today?\n\nYou have ${user.tokens} tokens.`);
-});
-
-bot.command('payments', (ctx) => {
-    const user = getUser(ctx.from.id);
-    paymentRequests.set(user.id, new Date());
-    ctx.reply(
-        'Tokens cost 1000 naira for 10. Make your payments here:\n\n' +
-        'https://flutterwave.com/pay/jinkrgxqambh\n\n' +
-        'then send the proof of payment (PDFs only) to get your tokens.'
-    );
-});
-
-// Handle PDF uploads for payment verification
-bot.on('document', async (ctx) => {
-    const user = getUser(ctx.from.id);
-    const document = ctx.message.document;
+async function handleDocument(msg) {
+    const user = getUser(msg.from.id);
+    const document = msg.document;
 
     if (!document.mime_type || document.mime_type !== 'application/pdf') {
-        return ctx.reply('Please send a PDF file for payment verification.');
+        return 'Please send a PDF file for payment verification.';
     }
 
     const requestTimestamp = paymentRequests.get(user.id);
     if (!requestTimestamp) {
-        return ctx.reply('Please use /payments command first before sending proof of payment.');
+        return 'Please use /payments command first before sending proof of payment.';
     }
 
     try {
-        ctx.reply('Verifying payment proof...');
-        const file = await ctx.telegram.getFile(document.file_id);
-        const response = await axios.get(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`, {
-            responseType: 'arraybuffer'
-        });
+        await sendTelegramMessage(msg.chat.id, 'Verifying payment proof...');
+        const file = await getFile(document.file_id);
+        const pdfData = await downloadFile(file.file_path);
 
-        const verificationResult = await verifyPaymentProof(response.data, requestTimestamp);
+        const verificationResult = await verifyPaymentProof(pdfData, requestTimestamp);
 
         if (verificationResult.valid) {
             user.tokens += 10;
-            floDb.set(user.id, user);
+            telegramDb.set(user.id, user);
             paymentRequests.delete(user.id);
-            ctx.reply('Payment verified! 10 tokens have been added to your account.');
+            return 'Payment verified! 10 tokens have been added to your account.';
         } else {
-            ctx.reply(`Payment verification failed: ${verificationResult.reason}`);
+            return `Payment verification failed: ${verificationResult.reason}`;
         }
     } catch (error) {
-        console.error('Error processing payment proof:', error);
-        ctx.reply('Error processing payment proof. Please try again or contact support.');
+        console.error('Error processing payment:', error);
+        return 'Error processing payment proof. Please try again or contact support.';
     }
-});
+}
 
-// Handle regular messages
-bot.on('message', async (ctx) => {
-    if (ctx.message.document) return; // Skip if it's a document (handled above)
+async function handleMessage(msg) {
+    const user = getUser(msg.from.id);
+    const photos = msg.photo || [];
 
-    const user = getUser(ctx.from.id);
-    const photos = ctx.message.photo || [];
-
-    // Validate number of attachments first
     if (photos.length > 5) {
-        return ctx.reply('Please send a maximum of 5 attachments at a time.');
+        return 'Please send a maximum of 5 attachments at a time.';
     }
 
-    // Check token balance
     const requiredTokens = photos.length > 0 ? 2 * photos.length : 1;
     if (user.tokens < requiredTokens) {
-        return ctx.reply('You do not have enough tokens for this request. Top up with /payments.');
+        return 'You do not have enough tokens for this request. Top up with /payments.';
     }
 
     try {
-        // Only deduct tokens right before processing
         user.tokens -= requiredTokens;
-        floDb.set(user.id, user);
+        telegramDb.set(user.id, user);
 
-        await ctx.reply('Processing your request...');
+        await sendTelegramMessage(msg.chat.id, 'Processing your request...');
 
-        // Prepare message for Claude
-        let messageForClaude = ctx.message.text || '';
+        let messageForClaude = msg.text || '';
         if (photos.length > 0) {
-            // Add photo processing logic here when implemented
             messageForClaude = `${messageForClaude}\n[Image analysis will be implemented soon]`;
         }
 
-        // Get response from Claude
-        const response = await askClaude(messageForClaude);
-        ctx.reply(response);
-
+        return await claudeMessage(messageForClaude);
     } catch (error) {
         console.error('Error processing message:', error);
+        user.tokens += requiredTokens;
+        telegramDb.set(user.id, user);
 
-        // Handle specific error cases
         if (error.message === 'IMAGE_PROCESSING_DISABLED') {
-            ctx.reply('Image processing is currently not available. Please send text messages only.');
-        } else {
-            ctx.reply('Sorry, there was an error processing your request. Please try again.');
+            return 'Image processing is currently not available. Please send text messages only.';
+        }
+        return 'Sorry, there was an error processing your request. Please try again.';
+    }
+}
+
+// Main webhook handler
+router.post('/', express.json(), async (req, res) => {
+    try {
+        const msg = req.body.message;
+        if (!msg) {
+            return res.sendStatus(200); // Ignore non-message updates
         }
 
-        // Refund tokens on error
-        user.tokens += requiredTokens;
-        floDb.set(user.id, user);
+        // Initialize user if new
+        if (!getUser(msg.from.id)) {
+            addUser(msg.from);
+            await sendTelegramMessage(msg.chat.id, `
+Hello there! Welcome to Florence*, your educational assistant at your fingertips.
+
+Interacting with Florence* costs you tokens*. Every now and then you'll get these, but you can also purchase more of them at any time.
+
+You currently have 10 tokens*. Feel free to send your text (one token*), images (two tokens*), or documents (two tokens*) and get answers immediately.
+
+Here are a few helpful commands for a smooth experience:
+
+/start - Florence* is now listening to you.
+/about - for more about Florence*.
+/tokens - see how many tokens you have left.
+/streak - see your streak.
+/payments - Top up your tokens* in a click.
+
+Please note: Every message except commands will be considered a prompt.
+            `);
+        }
+
+        let response;
+        if (msg.text && msg.text.startsWith('/')) {
+            response = await handleCommand(msg.text, msg);
+        } else if (msg.document) {
+            response = await handleDocument(msg);
+        } else {
+            response = await handleMessage(msg);
+        }
+
+        if (response) {
+            await sendTelegramMessage(msg.chat.id, response);
+        }
+
+        res.sendStatus(200);
+    } catch (error) {
+        console.error('Error handling webhook:', error);
+        res.sendStatus(500);
     }
 });
 
-// Start Express server
-app.listen(PORT, async () => {
-    console.log(`Server is running on port ${PORT}. Telegram`);
-    const webhookUrl = `${WEBHOOK_URL}/telegram`;
-
-    // Try to set up webhook with retry logic
-    const webhookSuccess = await setWebhookWithRetry(bot, webhookUrl);
-
-    if (!webhookSuccess) {
-        // Fall back to long polling if webhook setup fails
-        console.log('Falling back to long polling...');
-        bot.launch().catch(error => {
-            console.error('Error launching bot:', error);
+// Set webhook on startup
+async function setWebhook() {
+    try {
+        const webhookUrl = `${WEBHOOK_URL}/telegram`;
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+            url: webhookUrl
         });
+        console.log('Telegram webhook set successfully');
+    } catch (error) {
+        console.error('Error setting webhook:', error);
     }
-});
+}
 
-// Add graceful shutdown handling
-process.once('SIGINT', () => {
-    bot.stop('SIGINT');
-});
+setWebhook();
 
-process.once('SIGTERM', () => {
-    bot.stop('SIGTERM');
-});
+export { router as telegramRouter };
