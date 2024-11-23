@@ -4,6 +4,7 @@ import fetch from 'node-fetch';
 import bodyParser from 'body-parser';
 import twilio from 'twilio';
 import dotenv from 'dotenv';
+import telegramRouter from './routes/telegram.js';
 
 dotenv.config();
 
@@ -43,15 +44,16 @@ function isNewUser(WaId) {
  * @param {string} referralId 
  */
 function addUser(WaId, ProfileName, tokens, streak, referralId = `${ProfileName[0]}${WaId}`) {
-    floDb.push({ 
-        WaId, 
-        ProfileName, 
-        tokens, 
-        referralId, 
+    floDb.push({
+        WaId,
+        ProfileName,
+        tokens,
+        referralId,
         streak,
         lastTokenReward: new Date().toISOString(),
         lastActivity: new Date().toISOString(),
-        streakDate: new Date().toISOString()
+        streakDate: new Date().toISOString(),
+        conversationHistory: [] // Add this to store message history
     });
 }
 
@@ -111,16 +113,31 @@ async function newUserWalkthru(WaId, tokens) {
  * @param {Array} messages 
  * @returns {Promise<string>}
  */
-async function claudeMessage(messages) {
+async function claudeMessage(messages, user) {
     try {
+        // Add conversation history to the context
+        const fullContext = [
+            ...user.conversationHistory,
+            ...messages
+        ].slice(-10); // Keep last 10 messages for context
+
         const claudeMsg = await anthropic.messages.create({
             model: "claude-3-5-sonnet-20241022",
             max_tokens: 1024,
-            system: "You are a highly knowledgeable teacher on every subject. Your name is Florence*. You help people gain a deeper understanding on any topic. Respond with a clear and detailed, but not necessarily long explanation.",
-            messages: messages
+            system: "You are Florence*, a highly knowledgeable teacher on every subject. You help people gain a deeper understanding on any topic. Respond with a clear and detailed, but not necessarily long explanation. Remember previous context from the conversation when responding.",
+            messages: fullContext
         });
 
-        console.log(claudeMsg);
+        // Store the interaction in conversation history
+        user.conversationHistory.push(...messages, {
+            role: "assistant",
+            content: claudeMsg.content[0].text
+        });
+
+        // Keep conversation history manageable
+        if (user.conversationHistory.length > 20) {
+            user.conversationHistory = user.conversationHistory.slice(-20);
+        }
 
         return claudeMsg.content[0].text;
     } catch (error) {
@@ -137,12 +154,29 @@ async function claudeMessage(messages) {
 async function getBase64FromUrl(url) {
     try {
         const response = await fetch(url);
-        const buffer = await response.buffer();
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
         return buffer.toString('base64');
     } catch (error) {
         console.error('Error fetching image:', error);
         throw error;
     }
+}
+
+/**
+ * Validate media type
+ * @param {string} mediaType 
+ * @returns {boolean}
+ */
+function isValidMediaType(mediaType) {
+    const validTypes = [
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+        'application/pdf'
+    ];
+    return validTypes.includes(mediaType.toLowerCase());
 }
 
 /**
@@ -152,83 +186,118 @@ async function getBase64FromUrl(url) {
  * @returns {string}
  */
 function determineMediaType(url, contentType) {
-    // If content type is provided directly, normalize it
+    // If content type is provided directly
     if (contentType) {
-        // Convert to lowercase and handle common variations
         const normalizedType = contentType.toLowerCase();
-        if (normalizedType.includes('jpeg') || normalizedType.includes('jpg')) {
-            return 'image/jpeg';
-        }
-        if (normalizedType.includes('png')) {
-            return 'image/png';
-        }
-        if (normalizedType.includes('gif')) {
-            return 'image/gif';
-        }
-        if (normalizedType.includes('webp')) {
-            return 'image/webp';
+        const typeMap = {
+            'jpeg': 'image/jpeg',
+            'jpg': 'image/jpeg',
+            'png': 'image/png',
+            'gif': 'image/gif',
+            'webp': 'image/webp',
+            'pdf': 'application/pdf'
+        };
+
+        for (const [key, value] of Object.entries(typeMap)) {
+            if (normalizedType.includes(key)) {
+                return value;
+            }
         }
     }
-    
-    // If determining from URL, ensure we return exact matches
+
+    // If determining from URL
     const extension = url.split('.').pop().toLowerCase();
     const mimeTypes = {
         'jpg': 'image/jpeg',
         'jpeg': 'image/jpeg',
         'png': 'image/png',
         'gif': 'image/gif',
-        'webp': 'image/webp'
+        'webp': 'image/webp',
+        'pdf': 'application/pdf'
     };
+
     return mimeTypes[extension] || 'image/jpeg'; // default to jpeg if unable to determine
 }
 
 /**
- * Send message to Claude with attachments
+ * Enhanced function to handle image and document analysis
  * @param {Array<{url: string, contentType: string}>} mediaItems 
  * @param {string} prompt 
+ * @param {Object} user 
  * @returns {Promise<string>}
  */
-async function claudeMessageWithAttachment(mediaItems, prompt) {
+async function claudeMessageWithAttachment(mediaItems, prompt, user) {
     try {
         const attachmentPromises = mediaItems.map(async ({ url, contentType }) => {
-            const imageData = await getBase64FromUrl(url);
             const mediaType = determineMediaType(url, contentType);
-            
-            // Validate media type before sending to Claude
-            if (!['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(mediaType)) {
-                throw new Error(`Unsupported media type: ${mediaType}. Only JPEG, PNG, GIF, and WebP images are supported.`);
+
+            // Validate media type before processing
+            if (!isValidMediaType(mediaType)) {
+                throw new Error(`Unsupported media type: ${mediaType}. Supported types are: JPEG, PNG, GIF, WebP, and PDF`);
             }
+
+            const base64Data = await getBase64FromUrl(url);
 
             return {
                 type: "image",
                 source: {
                     type: "base64",
                     media_type: mediaType,
-                    data: imageData
+                    data: base64Data
                 }
             };
         });
 
         const attachments = await Promise.all(attachmentPromises);
-        
+
+        const message = {
+            role: "user",
+            content: [
+                ...attachments,
+                {
+                    type: "text",
+                    text: prompt || "Please analyze this attachment."
+                }
+            ]
+        };
+
+        // Add conversation history for context
+        const fullContext = [
+            ...user.conversationHistory,
+            message
+        ].slice(-10);
+
         const claudeMsg = await anthropic.messages.create({
             model: "claude-3-5-sonnet-20241022",
             max_tokens: 1024,
-            messages: [{
-                role: "user",
-                content: [
-                    ...attachments,
-                    {
-                        type: "text",
-                        text: prompt
-                    }
-                ]
-            }]
+            system: "You are Florence*, a highly knowledgeable teacher who helps analyze images and documents. Provide clear, detailed explanations about what you see.",
+            messages: fullContext
         });
+
+        // Store the interaction in conversation history
+        user.conversationHistory.push(message, {
+            role: "assistant",
+            content: claudeMsg.content[0].text
+        });
+
+        // Keep conversation history manageable
+        if (user.conversationHistory.length > 20) {
+            user.conversationHistory = user.conversationHistory.slice(-20);
+        }
 
         return claudeMsg.content[0].text;
     } catch (error) {
         console.error('Error in claudeMessageWithAttachment:', error);
+
+        // Provide more user-friendly error message
+        if (error.message.includes('Unsupported media type')) {
+            return "Sorry, I can only process images (JPEG, PNG, GIF, WebP) and PDF documents. Please try again with a supported file type.";
+        }
+
+        if (error.message.includes('Could not process image')) {
+            return "Sorry, I couldn't process that image. This might be because the file is too large or corrupted. Please try sending a different image or the same image in a different format.";
+        }
+
         throw error;
     }
 }
@@ -298,19 +367,18 @@ function updateUserActivity(user) {
 
 // Application
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 app.post('/whatsapp', async (req, res) => {
     let { WaId, MessageType, ProfileName, Body, NumMedia, MediaUrl0, MediaContentType0 } = req.body;
-
-    console.log(req.body);
 
     try {
         if (isNewUser(WaId)) {
             addUser(WaId, ProfileName, 25, 0);
             await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348164975875');
             await createMessage(`A new user, ${ProfileName} (+${WaId}) has joined Florence*.`, '2348143770724');
-            console.dir(floDb);
 
             await newUserWalkthru(WaId, getUser(WaId).tokens);
         } else {
@@ -327,8 +395,10 @@ app.post('/whatsapp', async (req, res) => {
                 );
             }
 
-            switch(Body) {
+            switch (Body) {
                 case '/start':
+                    // Reset conversation history on /start
+                    user.conversationHistory = [];
                     await createMessage(
                         `Hello ${ProfileName}, welcome to Florence*! What do you need help with today?\n\n` +
                         `You have ${user.tokens} tokens.`,
@@ -385,10 +455,9 @@ app.post('/whatsapp', async (req, res) => {
                         break;
                     }
 
-                    // Update user activity and check streak before processing message
                     updateUserActivity(user);
                     const { streakBroken, streakReward } = checkAndUpdateStreak(user);
-                    
+
                     if (streakReward > 0) {
                         await createMessage(
                             `🔥 Congratulations! You've maintained a ${user.streak}-day streak! ` +
@@ -411,21 +480,15 @@ app.post('/whatsapp', async (req, res) => {
                                     url: MediaUrl0,
                                     contentType: MediaContentType0
                                 }
-                            ].filter(item => item.url); // Only include items with valid URLs
-                            
-                            const claudeResponse = await claudeMessageWithAttachment(mediaItems, Body || "Please analyze this attachment.");
+                            ].filter(item => item.url);
+
+                            const claudeResponse = await claudeMessageWithAttachment(mediaItems, Body, user);
                             await createMessage(claudeResponse, WaId);
                         }
                     } else if (MessageType === 'text') {
                         user.tokens -= 1;
-                        const claudeResponse = await claudeMessage([{ role: "user", content: Body }]);
+                        const claudeResponse = await claudeMessage([{ role: "user", content: Body }], user);
                         await createMessage(claudeResponse, WaId);
-                    } else {
-                        await createMessage(
-                            `Sorry, this is a little too much for us to handle now. ` +
-                            `Could you try simplifying your prompt?`,
-                            WaId
-                        );
                     }
             }
         }
@@ -436,6 +499,8 @@ app.post('/whatsapp', async (req, res) => {
         res.status(500).send('An error occurred while processing your request');
     }
 });
+
+app.use('/telegram', telegramRouter);
 
 // Start the server
 const port = process.env.PORT;
